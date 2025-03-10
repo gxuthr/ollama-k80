@@ -17,7 +17,8 @@ static __global__ void mul_mat_vec(
     y   +=   sample              *stride_sample_y   +  channel               *stride_channel_y;
     dst +=   sample              *stride_sample_dst +  channel               *stride_channel_dst;
 
-    const float2 * y2 = (const float2 *) y;
+    const float4 * x4 = reinterpret_cast<const float4*>(x);
+    const float4 * y4 = reinterpret_cast<const float4*>(y);
 
     extern __shared__ char data_mmv[];
     float * buf_iw = (float *) data_mmv;
@@ -39,7 +40,7 @@ static __global__ void mul_mat_vec(
 
             for (int64_t col2 = tid; col2 < ncols2; col2 += block_size) {
                 const float2 tmpx = __half22float2(x2[col2]);
-                const float2 tmpy = y2[col2];
+                const float2 tmpy = y4[col2];
                 sumf += tmpx.x * tmpy.x;
                 sumf += tmpx.y * tmpy.y;
             }
@@ -48,7 +49,7 @@ static __global__ void mul_mat_vec(
             half2 sumh2 = make_half2(0.0f, 0.0f);
 
             for (int64_t col2 = tid; col2 < ncols2; col2 += block_size) {
-                const float2 tmp = y2[col2];
+                const float2 tmp = y4[col2];
                 sumh2 += x2[col2] * make_half2(tmp.x, tmp.y);
             }
 
@@ -63,7 +64,7 @@ static __global__ void mul_mat_vec(
 
         for (int64_t col2 = tid; col2 < ncols2; col2 += block_size) {
             const int    tmpx = x2[col2];
-            const float2 tmpy = y2[col2];
+            const float2 tmpy = y4[col2];
             sumf += float(reinterpret_cast<const nv_bfloat16 *>(&tmpx)[0]) * tmpy.x;
             sumf += float(reinterpret_cast<const nv_bfloat16 *>(&tmpx)[1]) * tmpy.y;
         }
@@ -191,6 +192,46 @@ static void mul_mat_vec_cuda(
                 (x, y, dst, ncols, nrows, stride_row, nchannels_x, nchannels_y, stride_channel_x, stride_channel_y, stride_channel_dst,
                  nsamples_x, nsamples_y, stride_sample_x, stride_sample_y, stride_sample_dst, stream);
         } break;
+    }
+}
+
+// K80优化的向量化配置
+template <typename T>
+static __global__ void k80_optimized_mmv_kernel(
+    const T* __restrict__ x,
+    const float* __restrict__ y,
+    float* __restrict__ dst,
+    const int64_t ncols,
+    const int64_t nrows) {
+    
+    __shared__ float tile[32][33];  // 32x32 tile + padding
+    
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int row = blockIdx.x * blockDim.y + ty;
+    
+    // 协作加载到共享内存
+    if (row < nrows && tx < ncols) {
+        tile[ty][tx] = x[row * ncols + tx] * y[tx];
+    } else {
+        tile[ty][tx] = 0.0f;
+    }
+    __syncthreads();
+    
+    // 规约求和
+    if (ty < 16) tile[tx][ty] += tile[tx][ty + 16];
+    __syncthreads();
+    if (ty < 8)  tile[tx][ty] += tile[tx][ty + 8];
+    __syncthreads();
+    if (ty < 4)  tile[tx][ty] += tile[tx][ty + 4];
+    __syncthreads();
+    if (ty < 2)  tile[tx][ty] += tile[tx][ty + 2];
+    __syncthreads();
+    if (ty < 1)  tile[tx][ty] += tile[tx][ty + 1];
+    
+    // 写回结果
+    if (ty == 0 && row < nrows) {
+        dst[row] = tile[tx][0];
     }
 }
 
