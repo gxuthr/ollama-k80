@@ -5,6 +5,15 @@ static  __global__ void im2col_kernel(
         const float * x, T * dst, int64_t batch_offset,
         int64_t offset_delta, int64_t IC, int64_t IW, int64_t IH, int64_t OH, int64_t OW, int64_t KW, int64_t KH, int64_t pelements, int64_t CHW,
         int s0, int s1, int p0, int p1, int d0, int d1) {
+    __shared__ float tile[32][32];
+    
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    if (tx < 32 && ty < 32) {
+        tile[ty][tx] = x[ty * IW + tx];
+    }
+    __syncthreads();
+
     const int64_t i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i >= pelements) {
         return;
@@ -31,7 +40,7 @@ static  __global__ void im2col_kernel(
         dst[offset_dst] = 0.0f;
     } else {
         const int64_t offset_src = ic * offset_delta + batch * batch_offset;
-        dst[offset_dst] = x[offset_src + iih * IW + iiw];
+        dst[offset_dst] = tile[iih][iiw];
     }
 }
 
@@ -60,6 +69,65 @@ static void im2col_cuda_f32(const float * x, float * dst,
     int s0,int s1,int p0,int p1,int d0,int d1, cudaStream_t stream) {
 
     im2col_cuda<float>(x, dst, IW, IH, OW, OH, KW, KH, IC, batch, batch_offset, offset_delta, s0, s1, p0, p1, d0, d1, stream);
+}
+
+// K80优化的im2col实现
+template <typename T>
+static __global__ void k80_optimized_im2col_kernel(
+    const float* x,
+    T* dst,
+    const int64_t batch_size,
+    const int64_t channels,
+    const int64_t height,
+    const int64_t width,
+    const int64_t kernel_h,
+    const int64_t kernel_w,
+    const int64_t pad_h,
+    const int64_t pad_w,
+    const int64_t stride_h,
+    const int64_t stride_w,
+    const int64_t dilation_h,
+    const int64_t dilation_w) {
+    
+    // 使用共享内存缓存输入数据
+    __shared__ float shared_input[32][32];
+    
+    const int64_t thread_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const int64_t output_h = (height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) / stride_h + 1;
+    const int64_t output_w = (width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) / stride_w + 1;
+    const int64_t output_size = output_h * output_w;
+    
+    // 协作加载到共享内存
+    if(threadIdx.x < 32 && threadIdx.y < 32) {
+        int h = blockIdx.y * 32 + threadIdx.y;
+        int w = blockIdx.x * 32 + threadIdx.x;
+        if(h < height && w < width) {
+            shared_input[threadIdx.y][threadIdx.x] = x[h * width + w];
+        }
+    }
+    __syncthreads();
+    
+    // 计算输出
+    if(thread_idx < output_size) {
+        const int64_t out_h = thread_idx / output_w;
+        const int64_t out_w = thread_idx % output_w;
+        
+        for(int64_t c = 0; c < channels; ++c) {
+            for(int64_t kh = 0; kh < kernel_h; ++kh) {
+                for(int64_t kw = 0; kw < kernel_w; ++kw) {
+                    const int64_t h = out_h * stride_h - pad_h + kh * dilation_h;
+                    const int64_t w = out_w * stride_w - pad_w + kw * dilation_w;
+                    
+                    if(h >= 0 && h < height && w >= 0 && w < width) {
+                        dst[((c * kernel_h + kh) * kernel_w + kw) * output_size + thread_idx] = 
+                            shared_input[h - blockIdx.y * 32][w - blockIdx.x * 32];
+                    } else {
+                        dst[((c * kernel_h + kh) * kernel_w + kw) * output_size + thread_idx] = 0;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
