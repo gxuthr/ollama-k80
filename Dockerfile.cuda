@@ -1,0 +1,14 @@
+FROM nvidia/cuda:11.4-devel-ubuntu20.04
+
+# 添加K80支持
+ENV CUDA_ARCH_FLAGS="-gencode arch=compute_37,code=sm_37"
+
+# 安装依赖
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 编译时添加K80支持
+ENV CMAKE_CUDA_ARCHITECTURES=37 
