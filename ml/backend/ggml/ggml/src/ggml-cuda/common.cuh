@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ggml.h"
-#include "ggml-cuda.h"
+#include "../ggml.h"
+#include "../ggml-cuda.h"
 
 #include <cstdint>
 #include <memory>
@@ -776,3 +776,223 @@ struct ggml_backend_cuda_context {
         return pool(device);
     }
 };
+
+// 添加性能监控
+struct ggml_cuda_performance_counters {
+    float kernel_time;      // kernel执行时间
+    float memory_transfer;  // 内存传输时间
+    int   sm_occupancy;     // SM占用率
+    float memory_bandwidth; // 内存带宽使用
+};
+
+static ggml_cuda_performance_counters perf_counters;
+
+// 性能监控宏
+#define GGML_CUDA_MEASURE_START(stream) \
+    cudaEvent_t start, stop; \
+    cudaEventCreate(&start); \
+    cudaEventCreate(&stop); \
+    cudaEventRecord(start, stream)
+
+#define GGML_CUDA_MEASURE_END(stream) \
+    cudaEventRecord(stop, stream); \
+    cudaEventSynchronize(stop); \
+    float milliseconds = 0; \
+    cudaEventElapsedTime(&milliseconds, start, stop); \
+    perf_counters.kernel_time = milliseconds
+
+// K80特定的错误处理宏
+#define CUDA_CHECK_K80_DETAILED(x, msg, ...) do {                                \
+    cudaError_t err = (x);                                                      \
+    if (err != cudaSuccess) {                                                  \
+        cudaDeviceProp prop;                                                   \
+        cudaGetDeviceProperties(&prop, ggml_cuda_get_device());               \
+        size_t free_mem, total_mem;                                           \
+        cudaMemGetInfo(&free_mem, &total_mem);                               \
+                                                                             \
+        fprintf(stderr,                                                      \
+            "\nK80 CUDA Error Details:\n"                                   \
+            "  Error: %s\n"                                                 \
+            "  Message: " msg "\n"                                         \
+            "  Location: %s:%d\n"                                         \
+            "  Device: %s\n"                                             \
+            "  Compute Capability: %d.%d\n"                             \
+            "  Memory: %zu/%zu MB (%.1f%% used)\n"                     \
+            "  ECC Enabled: %s\n"                                      \
+            __VA_ARGS__,                                              \
+            cudaGetErrorString(err),                                  \
+            __FILE__, __LINE__,                                      \
+            prop.name,                                               \
+            prop.major, prop.minor,                                 \
+            (total_mem - free_mem)/1024/1024, total_mem/1024/1024, \
+            (float)(total_mem - free_mem)*100.0f/total_mem,        \
+            prop.ECCEnabled ? "Yes" : "No"                         \
+        );                                                        \
+        throw std::runtime_error("K80 CUDA Error");              \
+    }                                                           \
+} while (0)
+
+// K80性能监控和调试系统
+class k80_performance_system {
+public:
+    static k80_performance_system& instance() {
+        static k80_performance_system inst;
+        return inst;
+    }
+
+    void initialize() {
+        // 初始化NVML
+        NVML_CHECK(nvmlInit());
+        device_handle = get_device_handle();
+        load_device_info();
+        start_monitoring();
+    }
+
+    void shutdown() {
+        stop_monitoring();
+        NVML_CHECK(nvmlShutdown());
+    }
+
+    // 性能分析
+    void analyze_kernel_performance(const char* kernel_name,
+                                  const dim3& grid,
+                                  const dim3& block,
+                                  size_t shared_mem_size) {
+        printf("\nAnalyzing kernel: %s\n", kernel_name);
+        
+        // 计算理论性能
+        float theoretical_occupancy = calculate_theoretical_occupancy(block, shared_mem_size);
+        
+        // 获取实际性能指标
+        nvmlUtilization_t utilization;
+        NVML_CHECK(nvmlDeviceGetUtilizationRates(device_handle, &utilization));
+        
+        // 输出分析结果
+        print_performance_analysis(theoretical_occupancy, utilization);
+        
+        // 提供优化建议
+        suggest_optimizations(theoretical_occupancy, utilization);
+    }
+
+private:
+    nvmlDevice_t device_handle;
+    cudaDeviceProp device_props;
+    std::atomic<bool> monitoring{false};
+    std::unique_ptr<std::thread> monitor_thread;
+
+    struct device_info {
+        int sm_count;
+        size_t total_memory;
+        int max_threads_per_sm;
+        size_t shared_mem_per_sm;
+    } info;
+
+    void load_device_info() {
+        CUDA_CHECK_K80_DETAILED(cudaGetDeviceProperties(&device_props, 
+            ggml_cuda_get_device()), "Failed to get device properties");
+            
+        info.sm_count = device_props.multiProcessorCount;
+        info.total_memory = device_props.totalGlobalMem;
+        info.max_threads_per_sm = device_props.maxThreadsPerMultiProcessor;
+        info.shared_mem_per_sm = device_props.sharedMemPerMultiprocessor;
+    }
+
+    float calculate_theoretical_occupancy(const dim3& block, size_t shared_mem_size) {
+        int active_blocks_per_sm;
+        CUDA_CHECK_K80_DETAILED(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks_per_sm,
+            nullptr,  // kernel function
+            block.x * block.y * block.z,
+            shared_mem_size
+        ), "Failed to calculate occupancy");
+
+        return (float)(active_blocks_per_sm * block.x * block.y * block.z) / 
+               info.max_threads_per_sm;
+    }
+
+    void print_performance_analysis(float theoretical_occupancy,
+                                  const nvmlUtilization_t& utilization) {
+        printf("Performance Analysis:\n");
+        printf("  Theoretical Occupancy: %.1f%%\n", theoretical_occupancy * 100);
+        printf("  GPU Utilization: %d%%\n", utilization.gpu);
+        printf("  Memory Utilization: %d%%\n", utilization.memory);
+        
+        // 获取内存使用情况
+        size_t free_mem, total_mem;
+        CUDA_CHECK_K80_DETAILED(cudaMemGetInfo(&free_mem, &total_mem),
+            "Failed to get memory info");
+        printf("  Memory Usage: %.1f%%\n",
+            (float)(total_mem - free_mem) * 100 / total_mem);
+            
+        // 获取ECC状态
+        nvmlEnableState_t ecc_mode;
+        NVML_CHECK(nvmlDeviceGetEccMode(device_handle, &ecc_mode));
+        printf("  ECC Mode: %s\n", ecc_mode == NVML_FEATURE_ENABLED ? "On" : "Off");
+    }
+
+    void suggest_optimizations(float theoretical_occupancy,
+                             const nvmlUtilization_t& utilization) {
+        printf("\nOptimization Suggestions:\n");
+        
+        if (theoretical_occupancy < 0.7f) {
+            printf("- Consider reducing shared memory usage or block size\n");
+            printf("- Try adjusting the number of registers per thread\n");
+        }
+        
+        if (utilization.gpu < 70) {
+            printf("- GPU utilization is low, check for CPU bottlenecks\n");
+            printf("- Consider increasing batch size or workload\n");
+        }
+        
+        if (utilization.memory > 90) {
+            printf("- High memory utilization, consider:\n");
+            printf("  * Using smaller data types\n");
+            printf("  * Implementing data streaming\n");
+            printf("  * Optimizing memory access patterns\n");
+        }
+    }
+};
+
+// K80特定的常量和配置
+namespace k80 {
+    // 设备特性
+    struct device_specs {
+        static constexpr int COMPUTE_CAPABILITY_MAJOR = 3;
+        static constexpr int COMPUTE_CAPABILITY_MINOR = 7;
+        static constexpr int NUM_SMS = 13;
+        static constexpr int MAX_THREADS_PER_SM = 2048;
+        static constexpr int MAX_BLOCKS_PER_SM = 16;
+        static constexpr int MAX_THREADS_PER_BLOCK = 1024;
+        static constexpr int WARP_SIZE = 32;
+    };
+
+    // 内存配置
+    struct memory_specs {
+        static constexpr size_t L1_CACHE_SIZE = 48 * 1024;
+        static constexpr size_t L2_CACHE_SIZE = 1536 * 1024;
+        static constexpr size_t SHARED_MEM_SIZE = 48 * 1024;
+        static constexpr size_t MAX_REGISTERS_PER_BLOCK = 65536;
+        static constexpr size_t MAX_REGISTERS_PER_THREAD = 255;
+        static constexpr size_t MEMORY_ALIGNMENT = 256;
+        static constexpr size_t TOTAL_MEMORY = 11ULL * 1024 * 1024 * 1024;
+    };
+
+    // 性能参数
+    struct performance_specs {
+        static constexpr float PEAK_MEMORY_BANDWIDTH = 240.0f;  // GB/s
+        static constexpr float PEAK_COMPUTE_TFLOPS = 2.91f;     // TFLOPS
+        static constexpr float PCIE_BANDWIDTH = 16.0f;          // GB/s
+        static constexpr int MAX_TEMPERATURE = 85;              // °C
+        static constexpr int MAX_POWER_USAGE = 150;             // Watts
+    };
+
+    // 优化配置
+    struct optimization_config {
+        bool use_tensor_cores = false;      // K80不支持tensor cores
+        bool prefer_shared_memory = true;   // 优先使用共享内存
+        bool enable_ecc = true;             // 启用ECC
+        int max_registers_per_thread = 64;  // 每线程最大寄存器数
+        float l1_cache_percentage = 0.0f;   // L1缓存百分比
+        float shared_mem_percentage = 1.0f; // 共享内存百分比
+    };
+}
