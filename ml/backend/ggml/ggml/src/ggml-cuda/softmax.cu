@@ -1,6 +1,6 @@
-#include "common.cuh"
 #include "ggml.h"
-#include "softmax.cuh"
+#include "ggml-cuda/common.cuh"
+#include "ggml-cuda/softmax.cuh"
 #include <cstdint>
 
 template <typename T>
@@ -150,26 +150,22 @@ static __global__ void soft_max_back_f32(
     }
 }
 
-template<typename T>
-static void soft_max_f32_cuda(const float * x, const T * mask, float * dst, const int ncols_x, const int nrows_x, const int nrows_y, const float scale, const float max_bias, cudaStream_t stream) {
-    int nth = WARP_SIZE;
-    while (nth < ncols_x && nth < CUDA_SOFT_MAX_BLOCK_SIZE) nth *= 2;
-    const dim3 block_dims(nth,     1, 1);
-    const dim3 block_nums(nrows_x, 1, 1);
-    const size_t nbytes_shared = (GGML_PAD(ncols_x, WARP_SIZE) + WARP_SIZE)*sizeof(float);
-    static_assert(CUDA_SOFT_MAX_BLOCK_SIZE == 1024, "These values need to be adjusted.");
+static void soft_max_f32_cuda(const float * x, const float * mask, float * dst, 
+    const int ncols_x, const int nrows_y, const float scale,
+    const float max_bias, const int m0, const int m1, const int n_head_log2,
+    cudaStream_t stream) {
 
-    const uint32_t n_head      = nrows_x/nrows_y;
-    const uint32_t n_head_log2 = 1u << (uint32_t) floorf(log2f((float) n_head));
+    // 减小block size以适应K80的共享内存限制
+    const int block_size = 256; // 原512
+    dim3 block_dims(block_size);
+    dim3 block_nums(nrows_y); 
+    
+    const size_t nbytes_shared = block_size * sizeof(float);
 
-    const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
-    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
-
-    // FIXME: this limit could be raised by ~2-4x on Ampere or newer
-    if (nbytes_shared < ggml_cuda_info().devices[ggml_cuda_get_device()].smpb) {
+    if (nbytes_shared < 48*1024) { // K80 shared memory limit
         switch (ncols_x) {
             case 32:
-                soft_max_f32<true,   32,   32><<<block_nums, block_dims, nbytes_shared, stream>>>
+                soft_max_f32<true, 32, 32><<<block_nums, block_dims, nbytes_shared, stream>>>
                     (x, mask, dst, ncols_x, nrows_y, scale, max_bias, m0, m1, n_head_log2);
                 break;
             case 64:
@@ -206,8 +202,9 @@ static void soft_max_f32_cuda(const float * x, const T * mask, float * dst, cons
                 break;
         }
     } else {
-        const size_t nbytes_shared_low = WARP_SIZE*sizeof(float);
-        soft_max_f32<false, 0, 0><<<block_nums, block_dims, nbytes_shared_low, stream>>>(x, mask, dst, ncols_x, nrows_y, scale, max_bias, m0, m1, n_head_log2);
+        // 大数据情况下使用全局内存
+        soft_max_f32<false, 0, 0><<<block_nums, block_dims, 0, stream>>>
+            (x, mask, dst, ncols_x, nrows_y, scale, max_bias, m0, m1, n_head_log2);
     }
 }
 
@@ -248,9 +245,9 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const bool use_f16 = (src1 && src1->type == GGML_TYPE_F16);
 
     if (use_f16) {
-        soft_max_f32_cuda(src0_d, (const half  *) src1_d, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, stream);
+        soft_max_f32_cuda(src0_d, (const half  *) src1_d, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, 0, 0, 0, stream);
     } else {
-        soft_max_f32_cuda(src0_d, (const float *) src1_d, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, stream);
+        soft_max_f32_cuda(src0_d, (const float *) src1_d, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, 0, 0, 0, stream);
     }
 }
 
