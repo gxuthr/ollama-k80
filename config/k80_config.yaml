@@ -1,0 +1,202 @@
+# Tesla K80 specific configurations
+gpu:
+  # K80 has Kepler architecture with compute capability 3.7
+  cuda_arch: "sm_37"
+  # K80 has 12GB memory per GPU
+  max_vram_gb: 12
+  # Optimal batch size for K80 based on testing
+  default_batch_size: 256
+  # Memory optimization settings
+  memory_optimization:
+    use_reduced_precision: true
+    enable_memory_efficient_attention: true
+    gradient_checkpointing: true
+    min_free_memory_mb: 2048  # 保持至少2GB空闲内存
+    oom_recovery: true        # 启用 OOM 恢复机制
+    dynamic_batching: true    # 启用动态批处理
+    max_memory_fraction: 0.95
+    memory_pool_size_mb: 1024
+  # K80 specific CUDA settings  
+  cuda_settings:
+    cuda_version: "11.4"  # Last CUDA version with good K80 support
+    cudnn_version: "8.2"
+    tensor_cores_enabled: false
+    max_register_count: 64    # 限制寄存器使用
+    shared_memory_size_mb: 48 # K80的共享内存大小
+  # Performance optimization settings
+  performance:
+    power_limit_watts: 150    # K80 TDP
+    memory_clock_mhz: 2505    # K80 默认显存频率
+    gpu_clock_mhz: 875       # K80 默认核心频率
+    ecc_enabled: true        # K80 支持 ECC
+    compute_mode: "default"  # CUDA 计算模式
+    max_compute_streams: 8
+    scheduler_mode: "spin"
+    target_latency_ms: 100
+    max_throughput_qps: 1000
+  # Auto tuning settings
+  auto_tuning:
+    enabled: true
+    interval_minutes: 5
+    metrics_window_size: 100
+    min_samples_for_tuning: 50
+    exploration_factor: 0.1
+    parameters:
+      batch_size:
+        min: 32
+        max: 512
+        step: 32
+      memory_fraction:
+        min: 0.5
+        max: 0.95
+        step: 0.05
+  # Error handling and recovery settings
+  error_handling:
+    max_retries: 3           # 最大重试次数
+    retry_delay_ms: 1000     # 重试延迟
+    fallback_to_cpu: true    # 允许在 GPU 失败时回退到 CPU
+    error_thresholds:
+      oom_errors_per_hour: 5
+      hardware_errors_per_day: 3
+    recovery_strategies:
+      - reduce_batch_size
+      - clear_cache
+      - restart_device
+  # Monitoring settings
+  monitoring:
+    enabled: true
+    interval_seconds: 5
+    metrics_retention_hours: 24
+    metrics:
+      - gpu_utilization
+      - memory_usage
+      - temperature
+      - power_usage
+      - compute_efficiency
+      - memory_bandwidth
+      - error_count
+    alerts:
+      temperature_threshold_celsius: 80
+      memory_usage_threshold_percent: 90
+      error_rate_threshold: 0.01
+      notification_channels:
+        - email
+        - slack
+    profiling:
+      enabled: true
+      sample_interval_ms: 100
+      max_profiles_per_hour: 6
+    metrics_compression:
+      enabled: true
+      algorithm: "delta"
+      window_size_s: 3600
+    alerts:
+      channels:
+        - type: "email"
+          recipients: ["admin@example.com"]
+        - type: "slack"
+          webhook_url: "https://hooks.slack.com/..."
+      rules:
+        - name: "high_memory_usage"
+          condition: "memory_usage > 90%"
+          severity: "critical"
+        - name: "high_temperature"
+          condition: "temperature > 80C"
+          severity: "warning"
+    dashboard:
+      update_frequency_ms: 1000
+      panels:
+        - name: "GPU Utilization"
+          type: "gauge"
+          metric: "gpu_utilization"
+        - name: "Memory Usage"
+          type: "line"
+          metric: "memory_usage"
+        - name: "Temperature"
+          type: "gauge"
+          metric: "temperature"
+  # Validation settings
+  validation:
+    min_batch_size: 32
+    max_batch_size: 512
+    min_vram_gb: 8
+    required_cuda_version: "11.4"
+    required_driver_version: "450.36"
+    compatibility_check: true
+  # Caching settings
+  caching:
+    enabled: true
+    max_cache_size_gb: 4
+    cache_type: "device"     # device 或 host
+    preload_models: true
+  # Debug options
+  debug:
+    enabled: false
+    verbose_logging: false
+    profile_kernels: false
+    save_memory_snapshots: false
+  # Logging settings
+  logging:
+    level: info
+    format: json
+    output: file
+    file_path: /var/log/ollama/gpu.log
+    max_size_mb: 100
+    max_files: 5
+    include_metrics: true
+  # Scheduler configuration
+  scheduler:
+    max_concurrent_tasks: 8
+    queue_size: 1000
+    preemption_enabled: true
+    scheduling_policy: "priority"
+    task_priorities:
+      - name: "critical"
+        weight: 100
+      - name: "high"
+        weight: 75
+      - name: "normal"
+        weight: 50
+      - name: "low"
+        weight: 25
+  # Recovery configuration
+  recovery:
+    enabled: true
+    max_retries: 3
+    retry_delay_ms: 1000
+    strategies:
+      - name: "oom_recovery"
+        priority: 100
+      - name: "hardware_recovery"
+        priority: 90
+      - name: "driver_recovery"
+        priority: 80
+    failure_thresholds:
+      oom_per_hour: 5
+      hardware_per_day: 3
+      driver_per_week: 1
+  # Profiler configuration
+  profiler:
+    enabled: true
+    sampling_rate_ms: 100
+    trace_enabled: true
+    bottleneck_detection:
+      enabled: true
+      check_interval_s: 60
+      thresholds:
+        memory_usage_percent: 90
+        gpu_utilization_percent: 95
+        temperature_celsius: 80
+    report_generation:
+      enabled: true
+      interval_minutes: 60
+      format: "html"
+      retention_days: 30
+  # Validation settings
+  validation:
+    min_batch_size: 32
+    max_batch_size: 512
+    min_vram_gb: 8
+    required_cuda_version: "11.4"
+    required_driver_version: "450.36"
+    compatibility_check: true 
