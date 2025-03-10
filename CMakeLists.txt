@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.20)
 
-project(Ollama C CXX)
+project(ollama-k80 CUDA CXX)
 
 include(CheckLanguage)
 
@@ -50,6 +50,28 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/include
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-cpu)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-cpu/amx)
 
+# 调整项目结构
+set(GGML_CUDA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml)
+set(GGML_CUDA_INCLUDE_DIRS
+    ${GGML_CUDA_ROOT}/include
+    ${GGML_CUDA_ROOT}/src
+    ${GGML_CUDA_ROOT}/src/ggml-cuda
+    ${GGML_CUDA_ROOT}/src/vendors
+)
+
+# 添加头文件搜索路径
+include_directories(
+    ${GGML_CUDA_ROOT}/src
+    ${GGML_CUDA_ROOT}/include
+    ${GGML_CUDA_ROOT}/src/ggml-cuda
+    ${GGML_CUDA_ROOT}/src/vendors
+    ${CUDA_INCLUDE_DIRS}
+)
+
+# 确保CUDA头文件可以被找到
+find_package(CUDA REQUIRED)
+include_directories(${CUDA_INCLUDE_DIRS})
+
 set(GGML_CPU ON)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src)
 set_property(TARGET ggml PROPERTY EXCLUDE_FROM_ALL TRUE)
@@ -73,7 +95,7 @@ if(CMAKE_CUDA_COMPILER)
         set(CMAKE_CUDA_ARCHITECTURES "native")
     endif()
 
-    find_package(CUDAToolkit)
+    find_package(CUDAToolkit 6.5 REQUIRED)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-cuda)
     set(OLLAMA_CUDA_INSTALL_DIR ${OLLAMA_INSTALL_DIR}/cuda_v${CUDAToolkit_VERSION_MAJOR})
     install(TARGETS ggml-cuda
@@ -84,6 +106,62 @@ if(CMAKE_CUDA_COMPILER)
         RUNTIME DESTINATION ${OLLAMA_CUDA_INSTALL_DIR} COMPONENT CUDA
         LIBRARY DESTINATION ${OLLAMA_CUDA_INSTALL_DIR} COMPONENT CUDA
     )
+
+    # 检查CUDA版本是否兼容K80
+    if(CUDAToolkit_VERSION VERSION_GREATER "11.4")
+        message(FATAL_ERROR "Tesla K80 only supports CUDA version up to 11.4")
+    endif()
+    if(CUDAToolkit_VERSION VERSION_LESS "6.5")
+        message(FATAL_ERROR "Tesla K80 requires CUDA version 6.5 or higher")
+    endif()
+
+    # 添加K80的compute capability支持
+    set(CMAKE_CUDA_ARCHITECTURES "37" CACHE STRING "CUDA architectures to compile for")
+
+    # 调整CUDA编译选项
+    if (GGML_CUDA_FORCE_DMMV)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DGGML_CUDA_FORCE_DMMV")
+    endif()
+
+    # 设置K80特定的CUDA编译选项
+    set(K80_CUDA_FLAGS
+        -arch=sm_37                     # K80的compute capability
+        -gencode arch=sm_37,code=sm_37  # 生成特定架构代码
+        --use_fast_math                 # 使用快速数学函数
+        --maxrregcount=64              # 限制寄存器使用
+        -Xptxas=-v,-O3                 # PTX汇编优化
+        --compiler-options -fPIC        # 位置无关代码
+        -D_FORCE_INLINES               # 强制内联
+        -DGGML_CUDA_K80               # K80特定宏定义
+        --diag-suppress=177           # 抑制某些警告
+    )
+
+    # 设置调试选项
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        list(APPEND K80_CUDA_FLAGS
+            -G                        # 生成调试信息
+            -DGGML_CUDA_DEBUG        # 启用调试宏
+            --ptxas-options=-v       # 显示详细编译信息
+        )
+    endif()
+
+    # 设置CUDA编译器选项
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${K80_CUDA_FLAGS}")
+
+    # 添加预编译头文件支持
+    if(MSVC)
+        target_precompile_headers(ggml-cuda PRIVATE
+            <cuda_runtime.h>
+            <cuda_fp16.h>
+            <cstdint>
+            <climits>
+        )
+    endif()
+
+    # 设置CUDA编译器选项
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -G")
+    endif()
 endif()
 
 set(WINDOWS_AMDGPU_TARGETS_EXCLUDE_REGEX "^gfx(906|908|90a):xnack[+-]$"
@@ -129,4 +207,99 @@ if(CMAKE_HIP_COMPILER)
             endif()
         endforeach()
     endif()
+endif()
+
+# 添加编译选项控制
+option(GGML_CUDA_K80 "Enable Tesla K80 support" ON)
+option(GGML_CUDA_DEBUG "Enable CUDA debug info" OFF)
+
+if(GGML_CUDA_K80)
+    add_definitions(-DGGML_CUDA_K80)
+    set(CMAKE_CUDA_ARCHITECTURES "37")
+endif()
+
+# 添加测试支持
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+# CUDA 配置
+set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
+
+# 检查 CUDA 工具链
+find_package(CUDA 11.4 REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+
+# K80 特定优化选项
+option(K80_OPTIMIZATIONS "Enable K80 specific optimizations" ON)
+if(K80_OPTIMIZATIONS)
+    add_definitions(-DK80_OPTIMIZATIONS)
+    # K80 特定的编译标志
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} \
+        --maxrregcount=64 \
+        --use_fast_math \
+        --restrict \
+        -Xptxas=-v \
+        -Xcompiler=-fPIC \
+        -Xcompiler=-Wall")
+endif()
+
+# 设置 CUDA 架构
+set(CMAKE_CUDA_ARCHITECTURES 37)  # Tesla K80 的架构
+set_property(GLOBAL PROPERTY CUDA_ARCHITECTURES "37")
+
+# 检查 cuBLAS 和 cuDNN
+if(USE_CUBLAS)
+    find_package(BLAS REQUIRED)
+    add_definitions(-DUSE_CUBLAS)
+endif()
+
+if(USE_CUDNN)
+    find_package(CUDNN REQUIRED)
+    add_definitions(-DUSE_CUDNN)
+endif()
+
+# 内存管理优化
+add_definitions(-DUSE_MANAGED_MEMORY)
+add_definitions(-DUSE_PINNED_MEMORY)
+
+# 添加源文件
+add_subdirectory(gpu)
+add_subdirectory(cuda)
+
+# 主要目标
+add_executable(ollama-k80
+    main.cpp
+    gpu/detector.cpp
+    gpu/monitor.cpp
+    gpu/cache_manager.cpp
+)
+
+# 链接 CUDA 库
+target_link_libraries(ollama-k80 PRIVATE
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::cudnn
+    ${CUDA_LIBRARIES}
+)
+
+# 安装规则
+install(TARGETS ollama-k80
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+
+# 安装配置文件
+install(FILES config/k80_config.yaml
+    DESTINATION etc/ollama
+)
+
+# 测试配置
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
