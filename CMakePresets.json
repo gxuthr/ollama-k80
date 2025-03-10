@@ -58,6 +58,39 @@
       "cacheVariables": {
         "AMDGPU_TARGETS": "gfx900;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-"
       }
+    },
+    {
+      "name": "k80-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "37",
+        "CMAKE_CUDA_FLAGS": "-arch=sm_37 -gencode=arch=compute_37,code=sm_37",
+        "USE_CUDA": "ON",
+        "USE_CUBLAS": "ON",
+        "USE_CUDNN": "ON",
+        "K80_OPTIMIZATIONS": "ON"
+      }
+    },
+    {
+      "name": "k80-release",
+      "inherits": "k80-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_LTO": "ON",
+        "BUILD_SHARED_LIBS": "OFF"
+      }
+    },
+    {
+      "name": "k80-debug",
+      "inherits": "k80-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_PROFILING": "ON",
+        "BUILD_TESTING": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -105,6 +138,16 @@
       "name": "ROCm 6",
       "inherits": [ "ROCm" ],
       "configurePreset": "ROCm 6"
+    },
+    {
+      "name": "k80-release",
+      "configurePreset": "k80-release",
+      "jobs": 8
+    },
+    {
+      "name": "k80-debug",
+      "configurePreset": "k80-debug",
+      "jobs": 8
     }
   ]
 }
