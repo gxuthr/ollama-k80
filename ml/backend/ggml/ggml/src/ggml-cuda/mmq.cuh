@@ -4,8 +4,8 @@
 #include "vecdotq.cuh"
 #include "mma.cuh"
 
-#include <climits>
 #include <cstdint>
+#include <climits>
 
 using namespace ggml_cuda_mma;
 
@@ -2941,3 +2941,52 @@ void ggml_cuda_op_mul_mat_q(
     const int64_t src1_padded_row_size, cudaStream_t stream);
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11);
+
+// 浼樺寲鐭╅樀涔樻硶閰嶇疆
+template <typename type>
+void mul_mat_q_cuda(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    // 璋冩暣block size閫傞厤K80
+    const int block_size = 128; // 鍘?56
+    
+    // 鏍规嵁K80鐨凷M鏁伴噺璋冩暣grid size
+    const int grid_size = std::min(
+        (args.ne11 + block_size - 1) / block_size,
+        13 // K80姣廏PU鏈?3涓猄M
+    );
+
+    // 璋冩暣shared memory浣跨敤
+    const int shmem_size = sizeof(float) * block_size;
+    if (shmem_size <= 48*1024) { // K80 shared memory limit
+        mul_mat_q_kernel<type><<<grid_size, block_size, shmem_size, stream>>>(
+            args.src0, args.src1, args.dst, args.ne00, args.ne01, args.ne02
+        );
+    } else {
+        // 浣跨敤鍏ㄥ眬鍐呭瓨鐗堟湰
+        mul_mat_q_kernel_global<type><<<grid_size, block_size, 0, stream>>>(
+            args.src0, args.src1, args.dst, args.ne00, args.ne01, args.ne02
+        );
+    }
+}
+
+// K80浼樺寲鐨勭煩闃典箻娉曢厤缃?struct k80_mmq_config {
+    static constexpr int BLOCK_SIZE = 128;  // 閫傞厤K80鐨凷M鏁伴噺
+    static constexpr int WARP_SIZE = 32;
+    static constexpr int MAX_SHARED_MEM = 48 * 1024;
+    
+    template<typename T>
+    static void optimize_mmq(const mmq_args & args, cudaStream_t stream) {
+        // 璁＄畻鏈€浼榞rid size
+        const int grid_size = std::min(
+            (args.ne11 + BLOCK_SIZE - 1) / BLOCK_SIZE,
+            CUDA_K80_NUM_SMS  // K80姣廏PU鏈?3涓猄M
+        );
+        
+        // 鍏变韩鍐呭瓨浼樺寲
+        const int shmem_size = sizeof(float) * BLOCK_SIZE;
+        if (shmem_size <= MAX_SHARED_MEM) {
+            mmq_kernel<T><<<grid_size, BLOCK_SIZE, shmem_size, stream>>>(args);
+        } else {
+            mmq_kernel_global<T><<<grid_size, BLOCK_SIZE, 0, stream>>>(args);
+        }
+    }
+};
