@@ -114,18 +114,48 @@ FROM ${FLAVOR} AS archive
 COPY --from=cpu dist/lib/ollama /lib/ollama
 COPY --from=build /bin/ollama /bin/ollama
 
-FROM ubuntu:20.04
-RUN apt-get update \
-    && apt-get install -y ca-certificates \
-    && apt-get clean \
+FROM nvidia/cuda:11.4.0-devel-ubuntu20.04 as builder
+
+# 安装必要的依赖
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=archive /bin /usr/bin
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-COPY --from=archive /lib/ollama /usr/lib/ollama
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV OLLAMA_HOST=0.0.0.0:11434
+
+# 设置 CUDA 架构标志
+ENV CUDA_ARCHITECTURE=sm_37
+ENV CUDA_FLAGS="-arch=sm_37 -gencode=arch=compute_37,code=sm_37"
+
+# 复制源代码
+COPY . /build
+WORKDIR /build
+
+# 编译优化
+RUN cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_FLAGS="${CUDA_FLAGS}" \
+    -DCMAKE_CUDA_ARCHITECTURES=37 \
+    -DUSE_CUDA=ON \
+    -DUSE_CUBLAS=ON \
+    -DUSE_CUDNN=ON \
+    && make -j$(nproc)
+
+# 运行时镜像
+FROM nvidia/cuda:11.4.0-runtime-ubuntu20.04
+
+# 复制编译产物
+COPY --from=builder /build/ollama /usr/local/bin/
+COPY --from=builder /build/config/k80_config.yaml /etc/ollama/
+
+# 设置环境变量
+ENV CUDA_VISIBLE_DEVICES=0
+ENV OLLAMA_HOST=0.0.0.0
+ENV OLLAMA_CONFIG=/etc/ollama/k80_config.yaml
+
+# 运行时优化
+ENV CUDA_CACHE_DISABLE=0
+ENV CUDA_CACHE_MAXSIZE=2147483648
+ENV CUDA_CACHE_PATH=/root/.cuda_cache
+
 EXPOSE 11434
-ENTRYPOINT ["/bin/ollama"]
-CMD ["serve"]
+ENTRYPOINT ["ollama"]
