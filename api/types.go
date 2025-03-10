@@ -591,33 +591,28 @@ func (opts *Options) FromMap(m map[string]interface{}) error {
 // values are used unless the user specifies other values explicitly.
 func DefaultOptions() Options {
 	return Options{
-		// options set on request to runner
-		NumPredict: -1,
-
-		// set a minimal num_keep to avoid issues on context shifts
-		NumKeep:          4,
-		Temperature:      0.8,
-		TopK:             40,
-		TopP:             0.9,
-		TypicalP:         1.0,
-		RepeatLastN:      64,
-		RepeatPenalty:    1.1,
-		PresencePenalty:  0.0,
-		FrequencyPenalty: 0.0,
-		Mirostat:         0,
-		MirostatTau:      5.0,
-		MirostatEta:      0.1,
-		Seed:             -1,
-
+		// 减小批处理大小以适应 K80 的显存
+		NumPredict: 512,  // 降低从默认的 -1
+		NumKeep: 4,
+		
+		// 调整温度和采样参数以平衡性能
+		Temperature: 0.7,    // 略微降低以提高性能
+		TopK: 20,           // 减小以降低内存使用
+		TopP: 0.8,          // 调整以平衡质量和性能
+		
+		// 减少重复惩罚以节省计算资源
+		RepeatLastN: 32,    // 从64减少到32
+		RepeatPenalty: 1.05,// 降低惩罚强度
+		
 		Runner: Runner{
-			// options set when the model is loaded
-			NumCtx:    int(envconfig.ContextLength()),
-			NumBatch:  512,
-			NumGPU:    -1, // -1 here indicates that NumGPU should be set dynamically
-			NumThread: 0,  // let the runtime decide
-			LowVRAM:   false,
-			UseMLock:  false,
-			UseMMap:   nil,
+			// K80 优化的运行时选项
+			NumCtx: int(envconfig.ContextLength()),
+			NumBatch: 256,  // 针对 K80 优化的批处理大小
+			NumGPU: 1,      // K80 通常是单 GPU 配置
+			NumThread: 4,    // 限制线程数以避免过度调度
+			LowVRAM: true,  // 启用低显存模式
+			UseMLock: true, // 锁定内存以提高性能
+			UseMMap: new(bool), // 启用内存映射
 		},
 	}
 }
